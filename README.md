@@ -19,13 +19,13 @@
 
 > 已预先在 GitHub 上创建好仓库 `TurtleMark`，只需一次配置。
 
-1. 双击仓库根目录的 **`deploy-to-github.bat`**
-2. 首次运行输入仓库地址：`https://github.com/你的用户名/TurtleMark.git`，再输入 Git 昵称和邮箱
-3. 推送时会弹出浏览器登录 GitHub（首次会弹出登录窗口，登录一次即可）
-4. 完成后打开仓库页面：**Settings → Pages → Build and deployment → Source 选 `GitHub Actions` → Save**
-5. 等待 1～2 分钟，网页自动上线：`https://你的用户名.github.io/TurtleMark/`
+1. 双击仓库根目录的 **`部署到github.bat`**（`deploy-to-github.bat` 是同一个脚本）
+2. 脚本自动提交并推送 `dev`（完整源码）和 `main`（触发网页 + 安卓 APK 自动构建）
+3. 首次推送会弹出浏览器登录 GitHub（登录一次即可）；git 走本地代理 `127.0.0.1:7897`，请确保代理已开启
+4. 完成后打开仓库页面：**Settings → Pages → Build and deployment → Source 选 `GitHub Actions` → Save**（只需一次）
+5. 等待 1～2 分钟，网页自动上线：`https://kimoji798.github.io/TurtleMark/`
 
-以后每次改完代码，**双击 `deploy-to-github.bat` 即可一键更新上线**。
+以后每次改完代码，**双击 `部署到github.bat` 即可一键更新上线**。
 
 ## 🍎 iPhone 使用（添加到主屏幕当 App）
 
@@ -113,7 +113,8 @@ python -m http.server 8080
 ├── tools/make-icons.ps1    # 图标生成脚本（可重新生成）
 ├── android/                # 安卓 App 工程（Android Studio / Gradle）
 ├── .github/workflows/      # 自动部署 + 自动构建 APK
-└── deploy-to-github.bat    # 一键部署脚本（双击运行）
+├── deploy.ps1              # 一键部署逻辑（提交 + 走代理推送到 GitHub）
+└── 部署到github.bat         # 一键部署脚本（双击运行）
 ```
 
 ## ⚠️ 使用须知
@@ -126,7 +127,7 @@ python -m http.server 8080
 ## ❓ 常见问题
 
 - **AI 修复一直显示加载？** 首次使用需从 GitHub Pages 下载约 60MB 模型，网速较慢时请耐心等待；之后由 Service Worker 缓存，可离线复用。
-- **推送提示仓库地址错误？** 删除根目录的 `deploy-config.txt` 后重新双击部署脚本。
+- **推送失败 / 连不上 GitHub？** 确认本地代理已开启（脚本使用 `127.0.0.1:7897`）；如提示仓库不存在，请到 GitHub 确认已创建名为 `TurtleMark` 的仓库。
 - **APK 提示无法安装？** 需要在手机设置里允许当前来源（浏览器/文件管理器）安装应用；首次安装可能还需关闭 Play Protect 的阻止提示。
 - **视频处理没有声音？** 少数旧版浏览器不支持录制音频，会降级为无声处理，建议升级 Chrome / Safari。
 

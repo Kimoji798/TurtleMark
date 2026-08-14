@@ -2,5 +2,5 @@
 <resources>
     <string name="app_name">TurtleMark 去水印</string>
     <!-- 部署后把这里改成你的 GitHub Pages 地址，例如 https://你的用户名.github.io/TurtleMark/ -->
-    <string name="app_url">https://Kimoji798.github.io/TurtleMark/</string>
+    <string name="app_url">https://kimoji798.github.io/TurtleMark/</string>
 </resources>
