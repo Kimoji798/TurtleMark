@@ -1,0 +1,18 @@
+deploy-config.txt
+.DS_Store
+Thumbs.db
+*.log
+
+# Android 构建产物
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+*.iml
+
+# Node（如有本地预览工具）
+node_modules/
+
+# 自动化测试（含大模型源文件，不部署）
+.test/
