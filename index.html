@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="description" content="TurtleMark 去水印：图片与视频水印去除工具，支持智能填充、马赛克、裁剪，全程本地处理，隐私安全。">
+  <meta name="description" content="TurtleMark 去水印：图片与视频水印去除工具，内置 AI 修复、涂抹即马赛克、AI 抠图、一键去豆包/Gemini 水印，全程本地处理，隐私安全。">
   <meta name="theme-color" content="#0b1020">
   <meta name="format-detection" content="telephone=no">
   <title>TurtleMark 去水印</title>
@@ -42,7 +42,7 @@
       <div class="drop-zone" id="imgDropZone">
         <div class="dz-icon">🖼</div>
         <p class="dz-title">选择一张图片</p>
-        <p class="dz-sub">支持 JPG / PNG / WebP，文件不会上传，内置 AI 模型本地修复</p>
+        <p class="dz-sub">支持 JPG / PNG / WebP，文件不会上传，内置 AI 模型本地修复 · 一键去豆包/Gemini 水印</p>
         <div class="dz-actions">
           <button class="btn primary" id="imgPickBtn">选择图片</button>
           <button class="btn ghost" id="imgCameraBtn">📷 拍照</button>
@@ -54,9 +54,9 @@
       <div class="editor hidden" id="imgEditor">
         <div class="toolbar" id="imgToolbar">
           <div class="tool-group">
-            <button class="tool active" data-tool="brush" title="画笔：涂抹水印区域">🖌 涂抹</button>
-            <button class="tool" data-tool="eraser" title="橡皮：擦掉多余标记">🧽 橡皮</button>
-            <button class="tool" data-tool="rect" title="矩形：框选水印区域">▭ 框选</button>
+            <button class="tool active" data-tool="brush" id="imgBrushTool" title="画笔：涂抹水印区域">🖌 涂抹</button>
+            <button class="tool" data-tool="eraser" id="imgEraserTool" title="橡皮：擦掉多余标记">🧽 橡皮</button>
+            <button class="tool" data-tool="rect" id="imgRectTool" title="矩形：框选水印区域">▭ 框选</button>
             <button class="tool" id="imgUndoBtn" title="撤销上一步">↩ 撤销</button>
             <button class="tool" id="imgClearBtn" title="清除所有标记">🧹 清除</button>
           </div>
@@ -67,32 +67,49 @@
         </div>
 
         <div class="toolbar mode-bar">
-          <span class="mode-label">去除方式</span>
+          <span class="mode-label">工具</span>
           <label class="mode"><input type="radio" name="imgMode" value="inpaint" checked> <span>✨ AI 修复</span></label>
-          <label class="mode"><input type="radio" name="imgMode" value="mosaic"> <span>🟫 马赛克</span></label>
-          <label class="mode"><input type="radio" name="imgMode" value="crop"> <span>✂️ 裁剪</span></label>
+          <label class="mode"><input type="radio" name="imgMode" value="mosaic"> <span>🟫 马赛克（效果）</span></label>
+          <label class="mode"><input type="radio" name="imgMode" value="cutout"> <span>🧩 抠图</span></label>
           <div class="tool-group slider-group hidden" id="imgMosaicGroup">
             <label>马赛克块</label>
             <input type="range" id="imgMosaicSize" min="4" max="40" value="14">
           </div>
+          <div class="auto-wm hidden" id="imgAutoWmWrap">
+            <button class="btn ghost" id="imgAutoWmBtn" title="自动检测豆包AI / Gemini 菱形水印并去除">⚡ 一键去水印</button>
+            <select id="imgAutoWmType" title="水印类型">
+              <option value="auto">自动检测</option>
+              <option value="doubao">豆包AI</option>
+              <option value="gemini">Gemini</option>
+            </select>
+          </div>
         </div>
 
-        <p class="hint ai-note">🧠 内置 AI 修复模型（本地推理，不上传任何数据）。首次使用会下载约 60MB 模型，之后离线可用；AI 修复需 1–3 分钟，请保持页面在前台。</p>
+        <p class="hint ai-note">🧠 内置 AI 模型（本地推理，不上传任何数据）。首次使用会显示下载进度条，走 CDN 并行加速下载，之后自动缓存、离线可用；AI 修复需 1–3 分钟，请保持页面在前台。</p>
 
         <div class="stage" id="imgStage">
           <canvas id="imgCanvas"></canvas>
           <canvas id="maskCanvas"></canvas>
+          <button class="zoom-reset hidden" id="imgZoomReset" title="恢复 1:1 显示">🔍 1:1 复位</button>
           <div class="busy hidden" id="imgBusy">
             <div class="spinner"></div>
             <p id="imgBusyText">正在处理…</p>
+            <div class="progress hidden" id="imgBusyProgress"><div class="progress-bar" id="imgBusyBar"></div></div>
+            <p class="progress-info hidden" id="imgBusyInfo"></p>
           </div>
         </div>
 
-        <p class="hint" id="imgHint">用画笔涂抹水印所在区域，涂抹越贴合水印轮廓效果越好</p>
+        <p class="hint" id="imgHint">用画笔涂抹水印所在区域，涂抹越贴合水印轮廓效果越好 · 双指缩放图片，双击复位</p>
 
         <div class="actions">
           <button class="btn primary big" id="imgApplyBtn">✨ AI 去水印</button>
           <button class="btn ghost" id="imgResetBtn">更换图片</button>
+        </div>
+
+        <div class="actions hidden" id="imgCutoutActions">
+          <button class="btn primary" id="imgCutoutDownloadBtn">💾 下载透明图</button>
+          <button class="btn ghost" id="imgCutoutRemoveBtn">🗑 移除主体</button>
+          <button class="btn ghost" id="imgCutoutBackBtn">↩ 返回编辑</button>
         </div>
 
         <div class="result hidden" id="imgResult">
@@ -175,7 +192,7 @@
     <section class="features">
       <div class="feature"><b>🔒 本地处理</b><span>文件不上传服务器，隐私安全</span></div>
       <div class="feature"><b>📱 全平台</b><span>网页 / iPhone 主屏幕 / 安卓应用</span></div>
-      <div class="feature"><b>🧠 内置 AI</b><span>LaMa 修复模型本地推理，效果自然</span></div>
+      <div class="feature"><b>🧠 内置 AI</b><span>AI 修复 + AI 抠图 + 一键去水印，本地推理</span></div>
     </section>
   </main>
 

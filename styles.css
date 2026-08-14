@@ -155,7 +155,7 @@ main { max-width: 640px; margin: 0 auto; padding: 0 16px; }
 .tool-group { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .tool-group.slider-group { gap: 8px; }
 .slider-group label { font-size: 12px; color: var(--text-dim); white-space: nowrap; }
-.slider-group input[type="range"] { width: 90px; accent-color: var(--accent); }
+.slider-group input[type="range"] { width: 170px; max-width: 44vw; accent-color: var(--accent); }
 
 .tool {
   appearance: none;
@@ -203,10 +203,29 @@ main { max-width: 640px; margin: 0 auto; padding: 0 16px; }
   min-height: 180px;
   overflow: hidden;
   touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
 }
 .stage > canvas { display: block; max-width: 100%; }
 #imgCanvas, #maskCanvas { position: absolute; inset: 0; margin: auto; }
 #maskCanvas { z-index: 2; pointer-events: none; opacity: 0.55; }
+#imgCanvas, #maskCanvas { will-change: transform; }
+.zoom-reset {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 30;
+  appearance: none;
+  border: 1px solid rgba(34, 211, 238, 0.55);
+  background: rgba(6, 10, 24, 0.82);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+  border-radius: 999px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
 .stage-video { background: #000; }
 .stage-video video { display: block; max-width: 100%; max-height: 52vh; }
 
@@ -216,7 +235,7 @@ main { max-width: 640px; margin: 0 auto; padding: 0 16px; }
 .busy {
   position: absolute;
   inset: 0;
-  z-index: 20;
+  z-index: 40;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -228,6 +247,21 @@ main { max-width: 640px; margin: 0 auto; padding: 0 16px; }
   font-weight: 600;
 }
 .busy p { margin: 0; }
+.progress {
+  width: min(72%, 300px);
+  height: 10px;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.progress-bar {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--accent), #7c3aed);
+  border-radius: 8px;
+  transition: width 0.12s linear;
+}
+.progress-info { font-size: 12px; font-weight: 500; color: var(--text-dim); }
 .spinner {
   width: 42px;
   height: 42px;
@@ -240,6 +274,20 @@ main { max-width: 640px; margin: 0 auto; padding: 0 16px; }
 
 /* ---------- 操作按钮 ---------- */
 .actions { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-top: 14px; }
+
+.auto-wm { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-left: auto; }
+.auto-wm .btn { padding: 6px 12px; font-size: 12px; }
+.auto-wm select {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--card-2);
+  color: var(--text-dim);
+  border-radius: 10px;
+  padding: 6px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
 
 /* ---------- 结果对比 ---------- */
 .result {
