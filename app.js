@@ -658,9 +658,41 @@ class AiInpaint {
     return this.loading;
   }
 
+  _clone(c) {
+    const out = document.createElement('canvas');
+    out.width = c.width;
+    out.height = c.height;
+    out.getContext('2d').drawImage(c, 0, 0);
+    return out;
+  }
+
   /**
-   * 把整张图缩放到 512×512 送进 LaMa，输出再放回原图尺寸，
-   * 只在水印区域（bbox + 软边羽化）内替换，保留原图其余细节。
+   * 把区域画进 512×512 模型输入中间并保持长宽比：
+   * zeroFill 用于遮罩（周边保持 0=已知区域）；图像则用边缘像素拉伸补边，给模型自然上下文。
+   */
+  _padSquare(src, sw, sh, ox, oy, zeroFill) {
+    const S = this.modelSize;
+    const c = document.createElement('canvas');
+    c.width = S; c.height = S;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(src, 0, 0, src.width, src.height, ox, oy, sw, sh);
+    if (zeroFill || (ox === 0 && oy === 0)) return c;
+    if (ox > 0) {
+      ctx.drawImage(c, ox, oy, 1, sh, 0, oy, ox, sh);
+      ctx.drawImage(c, ox + sw - 1, oy, 1, sh, ox + sw, oy, S - ox - sw, sh);
+    }
+    if (oy > 0) {
+      ctx.drawImage(c, 0, oy, S, 1, 0, 0, S, oy);
+      ctx.drawImage(c, 0, oy + sh - 1, S, 1, 0, oy + sh, S, S - oy - sh);
+    }
+    return c;
+  }
+
+  /**
+   * 区域化 AI 修复：只裁出水印周边区域，保持比例送入 512 模型（小区域还会放大到 512 级别），
+   * 遮罩做膨胀 + 羽化后回贴原图。相比整图缩小，细节保留多得多，去水印更干净。
    * @returns {Promise<HTMLCanvasElement>} 与输入同尺寸的合成结果
    */
   async inpaint(imageCanvas, maskCanvas, bbox, onProgress) {
@@ -668,23 +700,47 @@ class AiInpaint {
     const session = await this.ensureSession(onProgress);
     const S = this.modelSize;
     const n = S * S;
+    const W = imageCanvas.width, H = imageCanvas.height;
 
-    const ic = document.createElement('canvas');
-    ic.width = S; ic.height = S;
-    const ictx = ic.getContext('2d', { willReadFrequently: true });
-    ictx.imageSmoothingEnabled = true;
-    ictx.imageSmoothingQuality = 'high';
-    ictx.drawImage(imageCanvas, 0, 0, S, S);
-    const id = ictx.getImageData(0, 0, S, S).data;
+    // 1) 扩大区域：给模型留出足够上下文
+    const margin = Math.max(12, Math.round(Math.max(bbox.w, bbox.h) * 0.18));
+    const rx = Math.max(0, Math.floor(bbox.x - margin));
+    const ry = Math.max(0, Math.floor(bbox.y - margin));
+    const rx2 = Math.min(W, Math.ceil(bbox.x + bbox.w + margin));
+    const ry2 = Math.min(H, Math.ceil(bbox.y + bbox.h + margin));
+    const rw = rx2 - rx, rh = ry2 - ry;
+    if (rw <= 0 || rh <= 0) return this._clone(imageCanvas);
 
-    const mc = document.createElement('canvas');
-    mc.width = S; mc.height = S;
-    const mctx = mc.getContext('2d', { willReadFrequently: true });
-    mctx.imageSmoothingEnabled = true;
-    mctx.imageSmoothingQuality = 'high';
-    mctx.drawImage(maskCanvas, 0, 0, S, S);
-    const md = mctx.getImageData(0, 0, S, S).data;
+    const crop = document.createElement('canvas');
+    crop.width = rw; crop.height = rh;
+    crop.getContext('2d').drawImage(imageCanvas, rx, ry, rw, rh, 0, 0, rw, rh);
 
+    // 2) 遮罩二值化 + 轻度膨胀：把描边没盖住的水印边缘一起修复
+    const cmData = maskCanvas.getContext('2d', { willReadFrequently: true }).getImageData(rx, ry, rw, rh).data;
+    const bin = new Uint8Array(rw * rh);
+    for (let i = 0, j = 0; i < rw * rh; i++, j += 4) {
+      bin[i] = (cmData[j] > 24 || cmData[j + 1] > 24 || cmData[j + 2] > 24) ? 1 : 0;
+    }
+    const growPx = Math.max(1, Math.min(6, Math.round(Math.max(rw, rh) / 140)));
+    const grown = dilateMask(bin, rw, rh, growPx);
+    const fullMask = document.createElement('canvas');
+    fullMask.width = rw; fullMask.height = rh;
+    const fmc = fullMask.getContext('2d').createImageData(rw, rh);
+    for (let i = 0, j = 0; i < rw * rh; i++, j += 4) {
+      const v = grown[i] ? 255 : 0;
+      fmc.data[j] = v; fmc.data[j + 1] = v; fmc.data[j + 2] = v; fmc.data[j + 3] = v;
+    }
+    fullMask.getContext('2d').putImageData(fmc, 0, 0);
+
+    // 3) 保持比例缩放（小区域最多放大 2 倍，细节更多），边缘补边
+    const scale = Math.min(2, S / Math.max(rw, rh));
+    const sw = Math.max(1, Math.round(rw * scale));
+    const sh = Math.max(1, Math.round(rh * scale));
+    const ox = Math.round((S - sw) / 2), oy = Math.round((S - sh) / 2);
+    const inImg = this._padSquare(crop, sw, sh, ox, oy, false);
+    const inMask = this._padSquare(fullMask, sw, sh, ox, oy, true);
+    const id = inImg.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, S, S).data;
+    const md = inMask.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, S, S).data;
     const imgIn = new Float32Array(3 * n);
     const maskIn = new Float32Array(n);
     for (let i = 0; i < n; i++) {
@@ -700,79 +756,73 @@ class AiInpaint {
       mask: new ort.Tensor('float32', maskIn, [1, 1, S, S]),
     };
     const results = await session.run(feeds);
-    const out = results[session.outputNames[0]].data;
+    const raw = results[session.outputNames[0]].data;
+    let maxV = 0;
+    for (let i = 0; i < raw.length; i++) if (raw[i] > maxV) maxV = raw[i];
+    const gain = maxV <= 1.5 ? 255 : 1;
 
-    // 512 结果 → 原图尺寸
-    const full = document.createElement('canvas');
-    full.width = imageCanvas.width;
-    full.height = imageCanvas.height;
-    const fctx = full.getContext('2d', { willReadFrequently: true });
-    const od = fctx.createImageData(S, S);
+    // 4) 512 输出 → 区域尺寸
+    const out512 = document.createElement('canvas');
+    out512.width = S; out512.height = S;
+    const o512 = out512.getContext('2d').createImageData(S, S);
     for (let i = 0; i < n; i++) {
-      od.data[i * 4] = Math.max(0, Math.min(255, out[i]));
-      od.data[i * 4 + 1] = Math.max(0, Math.min(255, out[n + i]));
-      od.data[i * 4 + 2] = Math.max(0, Math.min(255, out[2 * n + i]));
-      od.data[i * 4 + 3] = 255;
+      o512.data[i * 4] = Math.max(0, Math.min(255, raw[i] * gain));
+      o512.data[i * 4 + 1] = Math.max(0, Math.min(255, raw[n + i] * gain));
+      o512.data[i * 4 + 2] = Math.max(0, Math.min(255, raw[2 * n + i] * gain));
+      o512.data[i * 4 + 3] = 255;
     }
-    const tmp = document.createElement('canvas');
-    tmp.width = S; tmp.height = S;
-    tmp.getContext('2d').putImageData(od, 0, 0);
-    fctx.imageSmoothingEnabled = true;
-    fctx.imageSmoothingQuality = 'high';
-    fctx.drawImage(tmp, 0, 0, full.width, full.height);
+    out512.getContext('2d').putImageData(o512, 0, 0);
+    const region = document.createElement('canvas');
+    region.width = rw; region.height = rh;
+    const rctx = region.getContext('2d', { willReadFrequently: true });
+    rctx.imageSmoothingEnabled = true;
+    rctx.imageSmoothingQuality = 'high';
+    rctx.drawImage(out512, ox, oy, sw, sh, 0, 0, rw, rh);
 
-    // 以原图为底，只在 bbox 附近用模糊后的遮罩 alpha 做软边合成
-    const blend = document.createElement('canvas');
-    blend.width = imageCanvas.width;
-    blend.height = imageCanvas.height;
-    const bctx = blend.getContext('2d', { willReadFrequently: true });
-    bctx.drawImage(imageCanvas, 0, 0);
-
-    const pad = 16;
-    const rx = Math.max(0, Math.floor(bbox.x - pad));
-    const ry = Math.max(0, Math.floor(bbox.y - pad));
-    const rx2 = Math.min(imageCanvas.width, Math.ceil(bbox.x + bbox.w + pad));
-    const ry2 = Math.min(imageCanvas.height, Math.ceil(bbox.y + bbox.h + pad));
-    const rw = rx2 - rx, rh = ry2 - ry;
-    if (rw <= 0 || rh <= 0) return blend;
-
-    const mFull = maskCanvas.getContext('2d', { willReadFrequently: true });
-    const mdFull = mFull.getImageData(rx, ry, rw, rh).data;
-    const alpha = new Float32Array(rw * rh);
-    for (let i = 0; i < rw * rh; i++) {
-      alpha[i] = (mdFull[i * 4] + mdFull[i * 4 + 1] + mdFull[i * 4 + 2]) > 0 ? 1 : 0;
-    }
-    // 盒式模糊做羽化（半径 8，步长 2 提速）
-    const blurred = new Float32Array(rw * rh);
-    const R = 8;
-    for (let y = 0; y < rh; y++) {
-      for (let x = 0; x < rw; x++) {
-        let s = 0, cnt = 0;
-        for (let dy = -R; dy <= R; dy += 2) {
-          const yy = y + dy;
-          if (yy < 0 || yy >= rh) continue;
-          for (let dx = -R; dx <= R; dx += 2) {
-            const xx = x + dx;
-            if (xx < 0 || xx >= rw) continue;
-            s += alpha[yy * rw + xx]; cnt++;
-          }
-        }
-        blurred[y * rw + x] = s / cnt;
-      }
-    }
-    const orig = bctx.getImageData(rx, ry, rw, rh).data;
-    const ai = fctx.getImageData(rx, ry, rw, rh).data;
+    // 5) 回贴原图：膨胀遮罩羽化后只替换标记区域，周围保持原样
+    const out = this._clone(imageCanvas);
+    const octx = out.getContext('2d', { willReadFrequently: true });
+    const feather = Math.max(2, Math.round(Math.max(rw, rh) / 120));
+    const alpha = boxBlurGray(grown, rw, rh, feather);
+    const orig = octx.getImageData(rx, ry, rw, rh).data;
+    const ai = rctx.getImageData(0, 0, rw, rh).data;
     const merged = new Uint8ClampedArray(orig.length);
     for (let i = 0, j = 0; i < rw * rh; i++, j += 4) {
-      const a = blurred[i];
+      const a = alpha[i];
       merged[j] = orig[j] + (ai[j] - orig[j]) * a;
       merged[j + 1] = orig[j + 1] + (ai[j + 1] - orig[j + 1]) * a;
       merged[j + 2] = orig[j + 2] + (ai[j + 2] - orig[j + 2]) * a;
       merged[j + 3] = 255;
     }
-    bctx.putImageData(new ImageData(merged, rw, rh), rx, ry);
-    return blend;
+    octx.putImageData(new ImageData(merged, rw, rh), rx, ry);
+    return out;
   }
+}
+
+/** 可分离盒式模糊（灰度），边缘 clamp，O(n) 速度 */
+function boxBlurGray(src, w, h, radius) {
+  const tmp = new Float32Array(w * h);
+  const out = new Float32Array(w * h);
+  const r = Math.max(1, radius | 0);
+  const win = 2 * r + 1;
+  for (let y = 0; y < h; y++) {
+    let sum = 0;
+    const row = y * w;
+    for (let x = -r; x <= r; x++) sum += src[row + Math.max(0, Math.min(w - 1, x))];
+    for (let x = 0; x < w; x++) {
+      tmp[row + x] = sum / win;
+      sum += src[row + Math.min(w - 1, x + r + 1)] - src[row + Math.max(0, x - r)];
+    }
+  }
+  for (let x = 0; x < w; x++) {
+    let sum = 0;
+    for (let y = -r; y <= r; y++) sum += tmp[Math.max(0, Math.min(h - 1, y)) * w + x];
+    for (let y = 0; y < h; y++) {
+      out[y * w + x] = sum / win;
+      sum += tmp[Math.min(h - 1, y + r + 1) * w + x] - tmp[Math.max(0, y - r) * w + x];
+    }
+  }
+  return out;
 }
 
 /* ============================================================
@@ -1129,6 +1179,8 @@ class ImageEditor {
     this.cutoutAi = new AiCutout();
     this.segMask = null;
     this.sourceCanvas = null;
+    this.strokeStore = { inpaint: [], mosaic: [], cutout: [] };
+    this._mode = null;
 
     // 缩放 / 手势
     this.zoom = { scale: 1, tx: 0, ty: 0 };
@@ -1174,22 +1226,39 @@ class ImageEditor {
         this.updateHint();
       });
     });
-    $('#imgBrushSize').addEventListener('input', e => { this.brushSize = +e.target.value; });
+    $('#imgBrushSize').addEventListener('input', e => {
+      this.brushSize = +e.target.value;
+      const v = $('#imgBrushVal');
+      if (v) v.textContent = e.target.value;
+    });
+    $('#imgMosaicSize').addEventListener('input', e => {
+      const v = $('#imgMosaicVal');
+      if (v) v.textContent = e.target.value;
+    });
     $('#imgUndoBtn').addEventListener('click', () => { this.undo(); });
     $('#imgClearBtn').addEventListener('click', () => { this.clearAll(); });
     $$('input[name="imgMode"]').forEach(r => r.addEventListener('change', () => this.onModeChange()));
     $('#imgAutoWmBtn').addEventListener('click', () => this.applyAutoWatermark($('#imgAutoWmType').value));
     $('#imgZoomReset').addEventListener('click', () => this.resetZoom());
+    $('#imgZoomIn').addEventListener('click', () => this.stepZoom(1.25));
+    $('#imgZoomOut').addEventListener('click', () => this.stepZoom(0.8));
   }
 
   onModeChange() {
     const m = this.mode;
+    if (this._mode && this._mode !== m) {
+      this.strokeStore[this._mode] = this.strokes;
+      this.strokes = this.strokeStore[m] || [];
+    }
+    this._mode = m;
     this.cancelCurrentStroke();
-    this.strokes = [];
-    this.segMask = null;
+    if (m !== 'cutout') this.segMask = null;
     $('#imgCompare').classList.add('hidden');
     $('#imgResult').classList.add('hidden');
     $('#imgCutoutActions').classList.add('hidden');
+    $('#imgDockResult').classList.add('hidden');
+    $('#imgDockCutout').classList.add('hidden');
+    $('#imgDockEdit').classList.remove('hidden');
     $('#imgRectTool').classList.toggle('hidden', m !== 'inpaint');
     $('#imgMosaicGroup').classList.toggle('hidden', m !== 'mosaic');
     $('#imgAutoWmWrap').classList.toggle('hidden', m !== 'inpaint');
@@ -1199,6 +1268,8 @@ class ImageEditor {
     else applyBtn.textContent = '✨ AI 去水印';
     $('#imgBrushTool').textContent = m === 'cutout' ? '🖌 保留' : (m === 'mosaic' ? '🖌 马赛克笔' : '🖌 涂抹');
     $('#imgEraserTool').textContent = m === 'cutout' ? '🧽 去除' : (m === 'mosaic' ? '🧽 恢复' : '🧽 橡皮');
+    const seg = $('#imgModeSeg');
+    if (seg) seg.querySelectorAll('.mode-seg-item').forEach(b => b.classList.toggle('active', b.dataset.seg === m));
     this.redrawMask();
     this.updateHint();
   }
@@ -1223,6 +1294,7 @@ class ImageEditor {
 
   setBusy(on, text, pct, info) {
     const busy = $('#imgBusy');
+    $('#imgEditor').classList.toggle('is-busy', !!on);
     if (!on) {
       busy.classList.add('hidden');
       $('#imgBusyProgress').classList.add('hidden');
@@ -1301,6 +1373,8 @@ class ImageEditor {
     const cmp = $('#imgCompare');
     if (cmp) cmp.style.transform = t;
     const zr = $('#imgZoomReset');
+    const zp = Math.round(z.scale * 100);
+    zr.textContent = zp === 100 ? '1:1' : zp + '%';
     zr.classList.toggle('hidden', z.scale <= 1.001 && Math.abs(z.tx) < 0.5 && Math.abs(z.ty) < 0.5);
   }
 
@@ -1349,6 +1423,14 @@ class ImageEditor {
     this.zoom = { scale: 1, tx: 0, ty: 0 };
     this.clampView();
     this.applyTransform();
+  }
+
+  stepZoom(factor) {
+    if (!this.loaded || this.busy) return;
+    if (!this.base) this.measureBase();
+    const r = $('#imgStage').getBoundingClientRect();
+    const s = Math.max(1, Math.min(8, this.zoom.scale * factor));
+    this.zoomAround({ x: r.left + r.width / 2, y: r.top + r.height / 2 }, s);
   }
 
   startPinch() {
@@ -1833,6 +1915,7 @@ class ImageEditor {
       ? Object.assign({}, s)
       : Object.assign({}, s, { points: s.points.map(p => Object.assign({}, p)) }));
     this.segMask = snap.segMask;
+    this.strokeStore[this.mode] = this.strokes;
     this.redrawMask();
     this.fitCanvasSize();
     this.resetZoom();
@@ -1851,6 +1934,9 @@ class ImageEditor {
         $('#imgResult').classList.add('hidden');
         $('#imgCompare').classList.add('hidden');
         $('#imgCutoutActions').classList.add('hidden');
+        $('#imgDockResult').classList.add('hidden');
+        $('#imgDockCutout').classList.add('hidden');
+        $('#imgDockEdit').classList.remove('hidden');
         $('#imgStage').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       } catch (e) {
         toast(e.message);
@@ -1858,6 +1944,7 @@ class ImageEditor {
       return;
     }
     this.strokes.pop();
+    this.strokeStore[this.mode] = this.strokes;
     this.redrawMask();
   }
 
@@ -1870,11 +1957,13 @@ class ImageEditor {
       }
       this.strokes = [];
       this.history = [];
+      this.strokeStore[this.mode] = this.strokes;
       this.redrawMask();
       toast('已恢复原图', 2000);
       return;
     }
     this.strokes = [];
+    this.strokeStore[this.mode] = this.strokes;
     this.redrawMask();
   }
 
@@ -1927,6 +2016,8 @@ class ImageEditor {
     this.strokes = [];
     this.history = [];
     this.segMask = null;
+    this.strokeStore = { inpaint: [], mosaic: [], cutout: [] };
+    this._mode = null;
     this.aiRunId++;
     this.loaded = true;
 
@@ -1935,6 +2026,9 @@ class ImageEditor {
     $('#imgResult').classList.add('hidden');
     $('#imgCompare').classList.add('hidden');
     $('#imgCutoutActions').classList.add('hidden');
+    $('#imgDockResult').classList.add('hidden');
+    $('#imgDockCutout').classList.add('hidden');
+    $('#imgDockEdit').classList.remove('hidden');
     this.fitCanvasSize();
     this.resetZoom();
     this.onModeChange();
@@ -1984,6 +2078,7 @@ class ImageEditor {
   async inpaintWithMask(bbox, maskSrc) {
     const before = this.cloneCanvas(this.canvas);
     const maskSnap = this.cloneCanvas(maskSrc);
+    this._lastBefore = before;
     this.setBusy(true, '正在处理…');
     await new Promise(r => setTimeout(r, 30));
     this.pushHistory();
@@ -1999,6 +2094,7 @@ class ImageEditor {
         const ok = await this.aiRefine(maskSnap, bbox);
         this.setBusy(true, ok ? '✅ AI 修复完成' : '已保留快速修复结果');
       }
+      this._lastBefore = null;
       return true;
     } catch (e) {
       console.error(e);
@@ -2015,11 +2111,14 @@ class ImageEditor {
       const maskData = maskSrc.getContext('2d', { willReadFrequently: true }).getImageData(bbox.x, bbox.y, w, h).data;
       const mask = new Uint8Array(w * h);
       for (let i = 0, j = 3; i < w * h; i++, j += 4) mask[i] = maskData[j] > 32 ? 1 : 0;
+      const growTimes = Math.max(1, Math.round(Math.max(w, h) / 400));
+      const grownMask = dilateMask(mask, w, h, Math.min(2, growTimes));
       const img = this.ctx.getImageData(bbox.x, bbox.y, w, h);
-      const ok = teleaInpaint(img.data, w, h, mask);
+      const ok = teleaInpaint(img.data, w, h, grownMask);
       if (!ok) { reject(new Error('标记区域没有可用的周围像素')); return; }
       this.ctx.putImageData(img, bbox.x, bbox.y);
       this.strokes = [];
+      this.strokeStore[this.mode] = this.strokes;
       this.redrawMask();
       resolve();
     });
@@ -2027,27 +2126,30 @@ class ImageEditor {
 
   async aiRefine(maskSnap, bbox) {
     const runId = ++this.aiRunId;
+    const src = this._lastBefore || this.canvas;
     if (!this.ai || !this.ai.isAvailable()) {
       window.__aiDone = false;
+      if (this.aiRunId === runId) this._lastBefore = null;
       toast('AI 运行库未加载，已保留快速修复结果', 4000);
       return false;
     }
     const prog = this.progressFn();
     try {
-      const out = await this.ai.inpaint(this.canvas, maskSnap, bbox, (text, pct, done, total) => {
+      const out = await this.ai.inpaint(src, maskSnap, bbox, (text, pct, done, total) => {
         if (typeof pct === 'number') prog('🧠 ' + text, pct, done, total);
         else prog('🧠 ' + text, undefined);
       });
       window.__aiDone = true;
       if (this.aiRunId !== runId) return false;
       this.ctx.drawImage(out, 0, 0);
-      const av = $('#imgAfterView');
-      if (av && av.width) av.getContext('2d').drawImage(this.canvas, 0, 0);
+      this.showResult(this._lastBefore || src, this.canvas);
+      if (this.aiRunId === runId) this._lastBefore = null;
       toast('✨ AI 修复完成', 3200);
       return true;
     } catch (e) {
       console.error('AI 修复失败', e);
       window.__aiDone = false;
+      if (this.aiRunId === runId) this._lastBefore = null;
       toast('AI 修复失败，已保留快速修复结果：' + (e && e.message ? String(e.message).slice(0, 80) : e) + '。请检查网络/存储后重试', 6000);
       return false;
     }
@@ -2063,9 +2165,13 @@ class ImageEditor {
       });
       this.segMask = mask;
       this.strokes = [];
+      this.strokeStore[this.mode] = this.strokes;
       this.pushHistory();
       this.redrawMask();
       $('#imgCutoutActions').classList.remove('hidden');
+      $('#imgDockEdit').classList.add('hidden');
+      $('#imgDockResult').classList.add('hidden');
+      $('#imgDockCutout').classList.remove('hidden');
       $('#imgCutoutActions').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       toast('抠图完成：绿色=主体，可用「保留/去除」画笔修正，然后下载透明图或移除主体', 4600);
     } catch (e) {
@@ -2117,8 +2223,10 @@ class ImageEditor {
     const mask = this.composeCutoutMask();
     const bbox = this.alphaBBox(mask);
     if (!bbox) { toast('主体区域为空，请先涂抹或重新抠图'); return; }
+    if (bbox.w * bbox.h > 500000 && !confirm('主体区域较大（' + bbox.w + '×' + bbox.h + '），AI 移除需要较长时间，是否继续？')) return;
     const before = this.cloneCanvas(this.canvas);
     const maskSnap = this.cloneCanvas(mask);
+    this._lastBefore = before;
     this.setBusy(true, '正在移除主体…');
     await new Promise(r => setTimeout(r, 30));
     this.pushHistory();
@@ -2129,16 +2237,36 @@ class ImageEditor {
       }
       this.showResult(before, this.canvas);
       const skipAi = new URLSearchParams(location.search).has('noai') || window.__skipAi === true;
-      if (skipAi) {
-        toast('✅ 处理完成（测试模式，已跳过 AI）', 2600);
-      } else {
+      if (!skipAi) {
         this.setBusy(true, '🧠 正在加载内置 AI 模型…');
         const ok = await this.aiRefine(maskSnap, bbox);
-        this.setBusy(true, ok ? '✅ 主体已移除' : '已保留快速修复结果');
+        if (!ok) {
+          // AI 失败：恢复原图，避免出现“点了没反应”的半成品状态
+          this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+          this.ctx.drawImage(before, 0, 0);
+          const av = $('#imgAfterView');
+          if (av && av.width) av.getContext('2d').drawImage(this.canvas, 0, 0);
+          $('#imgCompare').classList.add('hidden');
+          $('#imgResult').classList.add('hidden');
+          $('#imgDockResult').classList.add('hidden');
+          $('#imgDockEdit').classList.remove('hidden');
+          return;
+        }
       }
+      this._lastBefore = null;
+      // 移除完成：清空抠图遮罩，回到 AI 去水印模式展示结果
+      this.segMask = null;
+      this.strokes = [];
+      this.strokeStore[this.mode] = this.strokes;
+      const inpaintRadio = document.querySelector('input[name="imgMode"][value="inpaint"]');
+      if (inpaintRadio) {
+        inpaintRadio.checked = true;
+        this.onModeChange();
+      }
+      this.showResult(before, this.canvas);
     } catch (e) {
       console.error(e);
-      toast('处理失败：' + e.message);
+      toast('移除主体失败：' + (e && e.message || e));
     } finally {
       this.setBusy(false);
     }
@@ -2162,6 +2290,7 @@ class ImageEditor {
     }
     mctx.putImageData(im, det.x, det.y);
     this.strokes = [];
+    this.strokeStore[this.mode] = this.strokes;
     const pad = 12;
     const x0 = Math.max(0, det.x - pad);
     const y0 = Math.max(0, det.y - pad);
@@ -2187,11 +2316,15 @@ class ImageEditor {
     const sw = beforeCanvas.width * s, sh = beforeCanvas.height * s;
     bctx.drawImage(beforeCanvas, (bv.width - sw) / 2, (bv.height - sh) / 2, sw, sh);
     av.getContext('2d').drawImage(afterCanvas, 0, 0);
-    // 结果直接在原图窗口显示：滑块默认停在结尾（全部显示结果），向左拖动可对比原图
+    // 结果直接显示在原图窗口：滑块默认停在结尾（全部显示结果），向左拖动可对比原图
     $('#imgCompareRange').value = 100;
     this.updateCompare(100);
     $('#imgCompare').classList.remove('hidden');
     $('#imgResult').classList.remove('hidden');
+    $('#imgCutoutActions').classList.add('hidden');
+    $('#imgDockEdit').classList.add('hidden');
+    $('#imgDockCutout').classList.add('hidden');
+    $('#imgDockResult').classList.remove('hidden');
     $('#imgHint').textContent = '✅ 结果已显示在原图窗口 · 向左拖动图片上的滑块可对比原图 · 点「返回编辑」继续修改';
     this.applyTransform();
   }
@@ -2216,12 +2349,17 @@ class ImageEditor {
       this.history = [];
       this.current = null;
       this.segMask = null;
+      this.strokeStore = { inpaint: [], mosaic: [], cutout: [] };
+      this._mode = null;
       this.aiRunId++;
       this.resetZoom();
       $('#imgEditor').classList.add('hidden');
       $('#imgResult').classList.add('hidden');
       $('#imgCompare').classList.add('hidden');
       $('#imgCutoutActions').classList.add('hidden');
+      $('#imgDockResult').classList.add('hidden');
+      $('#imgDockCutout').classList.add('hidden');
+      $('#imgDockEdit').classList.remove('hidden');
       $('#imgDropZone').classList.remove('hidden');
     });
     $('#imgPickBtn').addEventListener('click', () => $('#imgInput').click());
@@ -2250,6 +2388,10 @@ class ImageEditor {
     $('#imgEditAgainBtn').addEventListener('click', () => {
       $('#imgResult').classList.add('hidden');
       $('#imgCompare').classList.add('hidden');
+      $('#imgCutoutActions').classList.add('hidden');
+      $('#imgDockResult').classList.add('hidden');
+      $('#imgDockCutout').classList.add('hidden');
+      $('#imgDockEdit').classList.remove('hidden');
       this.updateHint();
       $('#imgStage').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     });
@@ -2260,7 +2402,12 @@ class ImageEditor {
       saveResult(blob, '抠图-' + ts + '.png');
     });
     $('#imgCutoutRemoveBtn').addEventListener('click', () => this.removeSubject());
-    $('#imgCutoutBackBtn').addEventListener('click', () => $('#imgCutoutActions').classList.add('hidden'));
+    $('#imgCutoutBackBtn').addEventListener('click', () => {
+      $('#imgCutoutActions').classList.add('hidden');
+      $('#imgDockCutout').classList.add('hidden');
+      $('#imgDockResult').classList.add('hidden');
+      $('#imgDockEdit').classList.remove('hidden');
+    });
   }
 
   bindDropZone() {

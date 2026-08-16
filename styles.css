@@ -27,7 +27,7 @@ html, body {
   min-height: 100%;
 }
 
-body { padding-bottom: calc(30px + var(--safe-bottom)); }
+body { padding-bottom: calc(104px + var(--safe-bottom)); }
 
 button { font-family: inherit; }
 .hidden { display: none !important; }
@@ -226,21 +226,31 @@ main { max-width: 640px; margin: 0 auto; padding: 0 16px; }
 #imgCompare .compare-top { position: absolute; inset: 0; }
 #imgCompare .compare-divider { z-index: 2; }
 #imgCompare .compare-range { z-index: 3; }
-.zoom-reset {
+.zoom-controls {
   position: absolute;
   top: 8px;
   right: 8px;
   z-index: 30;
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+.zoom-btn {
   appearance: none;
+  min-width: 36px;
+  height: 32px;
+  padding: 0 12px;
   border: 1px solid rgba(34, 211, 238, 0.55);
   background: rgba(6, 10, 24, 0.82);
   color: var(--accent);
-  font-size: 12px;
-  font-weight: 700;
+  font-size: 16px;
+  font-weight: 800;
   border-radius: 999px;
-  padding: 6px 12px;
   cursor: pointer;
+  transition: transform 0.12s ease;
 }
+.zoom-btn:active { transform: scale(0.92); }
+.zoom-reset { font-size: 12px; font-weight: 700; min-width: 44px; }
 .stage-video { background: #000; }
 .stage-video video { display: block; max-width: 100%; max-height: 52vh; }
 
@@ -303,6 +313,101 @@ main { max-width: 640px; margin: 0 auto; padding: 0 16px; }
   font-weight: 600;
   cursor: pointer;
 }
+
+/* ---------- 模式分段控件 ---------- */
+.mode-seg {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.mode-seg-item {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 11px 4px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  color: var(--text-dim);
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.mode-seg-item input { display: none; }
+.mode-seg-item.active { color: var(--accent); border-color: rgba(34, 211, 238, 0.55); background: var(--accent-soft); }
+
+/* ---------- 画笔/马赛克滑块条 ---------- */
+.toolbar.slider-bar { justify-content: space-between; row-gap: 10px; }
+.brush-panel {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 230px;
+}
+.brush-panel label { font-size: 12px; color: var(--text-dim); white-space: nowrap; }
+.brush-panel input[type="range"] { flex: 1; width: auto; min-width: 150px; accent-color: var(--accent); }
+.range-val {
+  font-style: normal;
+  background: var(--accent-soft);
+  color: var(--accent);
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  margin-left: 2px;
+}
+
+/* ---------- 底部操作栏 ---------- */
+.action-dock {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 50;
+  padding: 10px 16px calc(10px + var(--safe-bottom));
+  background: linear-gradient(180deg, rgba(11, 16, 32, 0.94), rgba(11, 16, 32, 0.99));
+  border-top: 1px solid rgba(39, 51, 92, 0.6);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+.dock-state { display: flex; gap: 10px; max-width: 640px; margin: 0 auto; align-items: center; }
+.dock-state .btn { flex: 1; padding: 13px 14px; font-size: 15px; }
+
+/* 处理中锁定操作区 */
+#imgEditor.is-busy .mode-seg,
+#imgEditor.is-busy .toolbar,
+#imgEditor.is-busy .action-dock { pointer-events: none; opacity: 0.55; }
+
+/* ---------- 抠图完成提示条 ---------- */
+.cutout-strip {
+  margin-top: 12px;
+  background: rgba(34, 211, 238, 0.08);
+  border: 1px solid rgba(34, 211, 238, 0.35);
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+.cutout-strip-text { margin: 0; font-size: 13px; color: var(--accent); line-height: 1.6; text-align: center; }
+
+/* ---------- 对比角标 ---------- */
+.compare-tag {
+  position: absolute;
+  top: 8px;
+  z-index: 2;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: rgba(6, 10, 24, 0.72);
+  color: var(--accent);
+  border: 1px solid rgba(34, 211, 238, 0.4);
+  pointer-events: none;
+}
+.compare-tag.tag-before { left: 8px; }
+.compare-tag.tag-after { right: 8px; }
 
 /* ---------- 结果对比 ---------- */
 .result {
