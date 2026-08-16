@@ -549,29 +549,55 @@ class ModelFetcher {
     return blob;
   }
 
-  /** 预下载 onnxruntime 的 wasm 引擎并设置 wasmPaths（带进度） */
+  /** 预下载 onnxruntime 的 wasm 引擎并设置 wasmPaths（带进度）。
+   * 使用 1.18 的非线程 SIMD 构建：不依赖 SharedArrayBuffer / 跨域隔离，
+   * iPhone Safari 与安卓 WebView 均可用；推理放在代理 Worker 里，界面不卡死。 */
   static async prepareOrt(ort, onProgress) {
     const localDir = new URL('assets/onnx/', document.baseURI).href;
     const dirs = this.preferCdn
       ? MODEL_MIRRORS.map(m => m + 'assets/onnx/').concat([localDir])
       : [localDir].concat(MODEL_MIRRORS.map(m => m + 'assets/onnx/'));
-    const files = ['ort-wasm-simd-threaded.wasm', 'ort-wasm-simd-threaded.mjs'];
-    let wasmDir = dirs[0];
+    const files = ['ort-wasm-simd.wasm'];
     for (const f of files) {
       try {
         const res = await this.fetchBlob(dirs.map(d => d + f), (pct, done, total) => {
           if (onProgress) onProgress('正在下载 AI 引擎 ' + Math.round(pct * 100) + '%', pct, done, total);
         });
-        if (f.endsWith('.wasm')) wasmDir = res.url.slice(0, res.url.length - f.length);
+        // 同时写入同源地址的缓存：ORT 用同源地址加载 wasm，命中后离线可用
+        if (res && res.blob && res.url !== localDir + f) {
+          try {
+            const cache = await this.openCache();
+            if (cache) await cache.put(new Request(localDir + f), new Response(res.blob, { headers: { 'Content-Type': 'application/wasm' } }));
+          } catch (e) {
+            console.warn('写入同源引擎缓存失败（不影响使用）', e);
+          }
+        }
       } catch (e) {
         console.warn('AI 引擎预载失败，交给运行时处理', f, e);
       }
     }
-    ort.env.wasm.wasmPaths = wasmDir;
+    ort.env.wasm.wasmPaths = localDir;
     ort.env.wasm.numThreads = 1;
-    // 推理放进 Web Worker 执行，避免长时间占用主线程导致页面卡死/被杀
+    // 1.18 的 proxy 使用 blob URL worker（同源），手机端安全；创建失败会自动回退主线程
     ort.env.wasm.proxy = true;
   }
+}
+
+/** 创建 ORT 会话：优先在代理 Worker 中推理（界面不卡）；手机端 Worker 失败时自动回退主线程推理 */
+async function createOrtSession(ort, modelBuffer, opts) {
+  let lastErr = null;
+  for (const useProxy of [true, false]) {
+    try {
+      ort.env.wasm.proxy = useProxy;
+      const session = await ort.InferenceSession.create(modelBuffer, opts);
+      try { window.__ortProxyMode = useProxy ? 'worker' : 'main'; } catch (_) {}
+      return session;
+    } catch (e) {
+      lastErr = e;
+      console.warn('ORT 会话创建失败（proxy=' + useProxy + '），自动回退', e);
+    }
+  }
+  throw lastErr || new Error('AI 运行库初始化失败');
 }
 
 /* ============================================================
@@ -624,8 +650,8 @@ class AiInpaint {
       const blob = new Blob(parts);
       if (blob.size !== this.modelTotal) throw new Error('AI 修复模型大小校验失败');
       if (onProgress) onProgress('正在加载 AI 模型…');
-      this.session = await ort.InferenceSession.create(await blob.arrayBuffer(), {
-        executionProviders: ['wasm'], // LaMa 为 int8 量化模型，WebGPU 内核存在 Add 算子缺陷，走 wasm 更稳
+      this.session = await createOrtSession(ort, await blob.arrayBuffer(), {
+        executionProviders: ['wasm'], // LaMa 为 int8 量化模型，走 wasm 更稳
       });
       return this.session;
     })().catch(e => { this.loading = null; throw e; });
@@ -1013,8 +1039,8 @@ class AiCutout {
         if (onProgress) onProgress('正在下载抠图模型 ' + Math.round(pct * 100) + '%', pct, done, total);
       });
       if (onProgress) onProgress('正在加载抠图模型…');
-      this.session = await ort.InferenceSession.create(await res.blob.arrayBuffer(), {
-        executionProviders: ['wasm'], // WebGPU 不支持 u2netp 的 MaxPool ceil 形状计算，走 wasm
+      this.session = await createOrtSession(ort, await res.blob.arrayBuffer(), {
+        executionProviders: ['wasm'], // u2netp 走 wasm 更稳
       });
       return this.session;
     })().catch(e => { this.loading = null; throw e; });
@@ -1161,6 +1187,8 @@ class ImageEditor {
     this.cancelCurrentStroke();
     this.strokes = [];
     this.segMask = null;
+    $('#imgCompare').classList.add('hidden');
+    $('#imgResult').classList.add('hidden');
     $('#imgCutoutActions').classList.add('hidden');
     $('#imgRectTool').classList.toggle('hidden', m !== 'inpaint');
     $('#imgMosaicGroup').classList.toggle('hidden', m !== 'mosaic');
@@ -1270,6 +1298,8 @@ class ImageEditor {
     const t = 'translate(' + z.tx + 'px, ' + z.ty + 'px) scale(' + z.scale + ')';
     this.canvas.style.transform = t;
     this.maskCanvas.style.transform = t;
+    const cmp = $('#imgCompare');
+    if (cmp) cmp.style.transform = t;
     const zr = $('#imgZoomReset');
     zr.classList.toggle('hidden', z.scale <= 1.001 && Math.abs(z.tx) < 0.5 && Math.abs(z.ty) < 0.5);
   }
@@ -1819,6 +1849,7 @@ class ImageEditor {
       try {
         await this.restoreState(snap);
         $('#imgResult').classList.add('hidden');
+        $('#imgCompare').classList.add('hidden');
         $('#imgCutoutActions').classList.add('hidden');
         $('#imgStage').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       } catch (e) {
@@ -1902,6 +1933,7 @@ class ImageEditor {
     $('#imgDropZone').classList.add('hidden');
     $('#imgEditor').classList.remove('hidden');
     $('#imgResult').classList.add('hidden');
+    $('#imgCompare').classList.add('hidden');
     $('#imgCutoutActions').classList.add('hidden');
     this.fitCanvasSize();
     this.resetZoom();
@@ -1919,6 +1951,11 @@ class ImageEditor {
     for (const c of [this.canvas, this.maskCanvas]) {
       c.style.width = w + 'px';
       c.style.height = h + 'px';
+    }
+    const cmp = $('#imgCompare');
+    if (cmp) {
+      cmp.style.width = w + 'px';
+      cmp.style.height = h + 'px';
     }
     stage.style.minHeight = h + 'px';
     this.measureBase();
@@ -2150,9 +2187,13 @@ class ImageEditor {
     const sw = beforeCanvas.width * s, sh = beforeCanvas.height * s;
     bctx.drawImage(beforeCanvas, (bv.width - sw) / 2, (bv.height - sh) / 2, sw, sh);
     av.getContext('2d').drawImage(afterCanvas, 0, 0);
-    this.updateCompare(+$('#imgCompareRange').value);
+    // 结果直接在原图窗口显示：滑块默认停在结尾（全部显示结果），向左拖动可对比原图
+    $('#imgCompareRange').value = 100;
+    this.updateCompare(100);
+    $('#imgCompare').classList.remove('hidden');
     $('#imgResult').classList.remove('hidden');
-    $('#imgResult').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    $('#imgHint').textContent = '✅ 结果已显示在原图窗口 · 向左拖动图片上的滑块可对比原图 · 点「返回编辑」继续修改';
+    this.applyTransform();
   }
 
   bindCompare() {
@@ -2179,6 +2220,7 @@ class ImageEditor {
       this.resetZoom();
       $('#imgEditor').classList.add('hidden');
       $('#imgResult').classList.add('hidden');
+      $('#imgCompare').classList.add('hidden');
       $('#imgCutoutActions').classList.add('hidden');
       $('#imgDropZone').classList.remove('hidden');
     });
@@ -2207,6 +2249,8 @@ class ImageEditor {
     });
     $('#imgEditAgainBtn').addEventListener('click', () => {
       $('#imgResult').classList.add('hidden');
+      $('#imgCompare').classList.add('hidden');
+      this.updateHint();
       $('#imgStage').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     });
     $('#imgCutoutDownloadBtn').addEventListener('click', async () => {

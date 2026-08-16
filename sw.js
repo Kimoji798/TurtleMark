@@ -1,5 +1,5 @@
 /* TurtleMark Service Worker：应用外壳离线缓存 + AI 模型缓存（含 CDN 镜像） */
-const CACHE = 'turtlemark-v4';
+const CACHE = 'turtlemark-v5';
 const MODEL_CACHE = 'turtlemark-models';
 const CDN_ORIGIN = 'https://cdn.jsdelivr.net';
 const ASSETS = [
@@ -25,7 +25,7 @@ self.addEventListener('install', event => {
 self.addEventListener('activate', event => {
   event.waitUntil(
     caches.keys()
-      .then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
+      .then(keys => Promise.all(keys.filter(k => k !== CACHE && k !== MODEL_CACHE).map(k => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });

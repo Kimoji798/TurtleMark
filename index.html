@@ -90,6 +90,12 @@
         <div class="stage" id="imgStage">
           <canvas id="imgCanvas"></canvas>
           <canvas id="maskCanvas"></canvas>
+          <div class="compare hidden" id="imgCompare" aria-label="原图对比层">
+            <canvas id="imgBeforeView"></canvas>
+            <canvas id="imgAfterView" class="compare-top"></canvas>
+            <div class="compare-divider" id="imgDivider"><div class="compare-handle">⇔</div></div>
+            <input type="range" class="compare-range" id="imgCompareRange" min="0" max="100" value="100">
+          </div>
           <button class="zoom-reset hidden" id="imgZoomReset" title="恢复 1:1 显示">🔍 1:1 复位</button>
           <div class="busy hidden" id="imgBusy">
             <div class="spinner"></div>
@@ -113,13 +119,7 @@
         </div>
 
         <div class="result hidden" id="imgResult">
-          <p class="result-title">处理完成 · 拖动滑块对比效果</p>
-          <div class="compare" id="imgCompare">
-            <canvas id="imgBeforeView"></canvas>
-            <canvas id="imgAfterView" class="compare-top"></canvas>
-            <div class="compare-divider" id="imgDivider"><div class="compare-handle">⇔</div></div>
-            <input type="range" class="compare-range" id="imgCompareRange" min="0" max="100" value="50">
-          </div>
+          <p class="result-title">✅ 处理完成 · 向左拖动滑块可对比原图</p>
           <div class="actions">
             <button class="btn primary" id="imgDownloadBtn">💾 下载结果</button>
             <button class="btn ghost" id="imgShareBtn">📤 分享</button>
