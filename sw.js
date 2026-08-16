@@ -1,5 +1,5 @@
 /* TurtleMark Service Worker：应用外壳离线缓存 + AI 模型缓存（含 CDN 镜像） */
-const CACHE = 'turtlemark-v3';
+const CACHE = 'turtlemark-v4';
 const MODEL_CACHE = 'turtlemark-models';
 const CDN_ORIGIN = 'https://cdn.jsdelivr.net';
 const ASSETS = [

@@ -208,7 +208,7 @@ main { max-width: 640px; margin: 0 auto; padding: 0 16px; }
   -webkit-touch-callout: none;
 }
 .stage > canvas { display: block; max-width: 100%; }
-#imgCanvas, #maskCanvas { position: absolute; inset: 0; margin: auto; }
+#imgCanvas, #maskCanvas { position: absolute; inset: 0; margin: auto; transform-origin: 0 0; }
 #maskCanvas { z-index: 2; pointer-events: none; opacity: 0.55; }
 #imgCanvas, #maskCanvas { will-change: transform; }
 .zoom-reset {

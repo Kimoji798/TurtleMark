@@ -351,6 +351,13 @@ function stripCropFor(w, h, r) {
  * 部署在 GitHub Pages 时优先走 jsDelivr CDN（国内下载更快）
  * ============================================================ */
 const MODEL_CDN = 'https://cdn.jsdelivr.net/gh/Kimoji798/TurtleMark@main/';
+const MODEL_MIRRORS = [
+  'https://cdn.jsdelivr.net/gh/Kimoji798/TurtleMark@main/',
+  'https://fastly.jsdelivr.net/gh/Kimoji798/TurtleMark@main/',
+  'https://gcore.jsdelivr.net/gh/Kimoji798/TurtleMark@main/',
+  'https://ghfast.top/https://raw.githubusercontent.com/Kimoji798/TurtleMark/main/',
+];
+
 const MODEL_CACHE = 'turtlemark-models';
 const LAMA_TOTAL = 62208604;
 const LAMA_PARTS = 8;
@@ -382,35 +389,81 @@ class ModelFetcher {
     try { return await caches.open(MODEL_CACHE); } catch (e) { return null; }
   }
 
-  /** 依次尝试多个候选地址，返回 { blob, url }。命中缓存则秒开。 */
+  /** 依次尝试多个候选地址：先并发探测所有镜像挑最快可用源，带超时保护与重试。返回 { blob, url }。 */
   static async fetchBlob(urls, onProgress, opts = {}) {
+    const cands = Array.isArray(urls[0]) ? urls : [urls];
+    const flat = [];
+    for (const group of cands) for (const u of group) if (!flat.includes(u)) flat.push(u);
+    const attempts = opts.attempts || 2;
     let lastErr = null;
-    for (const url of urls) {
-      try {
-        const cache = await this.openCache();
-        if (cache) {
-          const hit = await cache.match(url);
-          if (hit) {
-            const blob = await hit.blob();
-            if (blob && blob.size > 0) {
-              if (onProgress) onProgress(1, blob.size, blob.size, url);
-              return { blob, url };
-            }
-          }
-        }
-        const blob = await this.parallelDownload(url, onProgress, opts);
-        if (cache) {
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const cache = await this.openCache();
+      if (cache) {
+        for (const url of flat) {
           try {
-            await cache.put(url, new Response(blob, { headers: { 'Content-Type': 'application/octet-stream' } }));
+            const hit = await cache.match(url);
+            if (hit) {
+              const blob = await hit.blob();
+              if (blob && blob.size > 0) {
+                if (onProgress) onProgress(1, blob.size, blob.size, url);
+                return { blob, url };
+              }
+            }
           } catch (_) {}
         }
-        return { blob, url };
-      } catch (e) {
-        lastErr = e;
-        if (opts.onUrlFail) opts.onUrlFail(url, e);
       }
+      const probes = await this.probeCandidates(flat, opts.probeMs || 6000);
+      const order = probes.length ? probes : flat;
+      for (const url of order) {
+        try {
+          const blob = await this.downloadOne(url, onProgress, opts);
+          if (cache) {
+            try {
+              await cache.put(url, new Response(blob, { headers: { 'Content-Type': 'application/octet-stream' } }));
+            } catch (_) {}
+          }
+          return { blob, url };
+        } catch (e) {
+          lastErr = e;
+          if (opts.onUrlFail) opts.onUrlFail(url, e);
+          console.warn('模型下载源失败，尝试下一个：', url, e && e.message);
+        }
+      }
+      if (attempt < attempts - 1) await new Promise(r => setTimeout(r, 600));
     }
     throw lastErr || new Error('模型下载失败');
+  }
+
+  /** 并发探测所有候选地址（Range 探针），按响应速度排序返回可用 URL 列表 */
+  static async probeCandidates(flat, ms) {
+    const jobs = flat.map(async url => {
+      const t0 = performance.now();
+      try {
+        const ctl = new AbortController();
+        const timer = setTimeout(() => ctl.abort(), ms);
+        const res = await fetch(url, { headers: { Range: 'bytes=0-0' }, cache: 'no-store', signal: ctl.signal });
+        clearTimeout(timer);
+        if (!res.ok && res.status !== 206) throw new Error('HTTP ' + res.status);
+        return { url, ms: performance.now() - t0 };
+      } catch (_) { return null; }
+    });
+    return (await Promise.all(jobs)).filter(Boolean).sort((a, b) => a.ms - b.ms).map(x => x.url);
+  }
+
+  /** 下载单个地址：无进展 20 秒自动切换下一个源，整体 90 秒上限 */
+  static async downloadOne(url, onProgress, opts = {}) {
+    const ctl = new AbortController();
+    let timer = setTimeout(() => ctl.abort(), opts.stallMs || 20000);
+    const totalTimer = setTimeout(() => ctl.abort(), opts.totalMs || 90000);
+    const guard = () => { clearTimeout(timer); timer = setTimeout(() => ctl.abort(), opts.stallMs || 20000); };
+    try {
+      return await this.parallelDownload(url, (pct, done, total) => {
+        guard();
+        if (onProgress) onProgress(pct, done, total, url);
+      }, Object.assign({}, opts, { signal: ctl.signal }));
+    } finally {
+      clearTimeout(timer); clearTimeout(totalTimer);
+    }
   }
 
   /** 单地址下载：支持 Range 时 8 线程并行分块（慢网络可提速数倍） */
@@ -420,7 +473,7 @@ class ModelFetcher {
     let canRange = false;
     let probe = null;
     try {
-      probe = await fetch(url, { headers: { Range: 'bytes=0-0' }, cache: 'no-store' });
+      probe = await fetch(url, { headers: { Range: 'bytes=0-0' }, cache: 'no-store', signal: opts.signal });
       canRange = probe.status === 206;
       const cr = probe.headers.get('content-range') || '';
       total = +(cr.split('/').pop() || 0);
@@ -443,7 +496,7 @@ class ModelFetcher {
         let lastErr = null;
         for (let attempt = 0; attempt < 2; attempt++) {
           try {
-            const res = await fetch(url, { headers: { Range: 'bytes=' + start + '-' + end }, cache: 'no-store' });
+            const res = await fetch(url, { headers: { Range: 'bytes=' + start + '-' + end }, cache: 'no-store', signal: opts.signal });
             if (res.status !== 206 || !res.body) throw new Error('HTTP ' + res.status);
             const reader = res.body.getReader();
             const chunks = [];
@@ -472,7 +525,7 @@ class ModelFetcher {
       if (blob.size !== total) throw new Error('模型大小校验失败');
       return blob;
     }
-    const res = await fetch(url, { cache: 'no-store' });
+    const res = await fetch(url, { cache: 'no-store', signal: opts.signal });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     if (!res.body) {
       const blob = await res.blob();
@@ -499,14 +552,14 @@ class ModelFetcher {
   /** 预下载 onnxruntime 的 wasm 引擎并设置 wasmPaths（带进度） */
   static async prepareOrt(ort, onProgress) {
     const localDir = new URL('assets/onnx/', document.baseURI).href;
-    const cdnDir = MODEL_CDN + 'assets/onnx/';
-    const primary = this.preferCdn ? cdnDir : localDir;
-    const fallback = this.preferCdn ? localDir : cdnDir;
+    const dirs = this.preferCdn
+      ? MODEL_MIRRORS.map(m => m + 'assets/onnx/').concat([localDir])
+      : [localDir].concat(MODEL_MIRRORS.map(m => m + 'assets/onnx/'));
     const files = ['ort-wasm-simd-threaded.wasm', 'ort-wasm-simd-threaded.mjs'];
-    let wasmDir = primary;
+    let wasmDir = dirs[0];
     for (const f of files) {
       try {
-        const res = await this.fetchBlob([primary + f, fallback + f], (pct, done, total) => {
+        const res = await this.fetchBlob(dirs.map(d => d + f), (pct, done, total) => {
           if (onProgress) onProgress('正在下载 AI 引擎 ' + Math.round(pct * 100) + '%', pct, done, total);
         });
         if (f.endsWith('.wasm')) wasmDir = res.url.slice(0, res.url.length - f.length);
@@ -516,6 +569,8 @@ class ModelFetcher {
     }
     ort.env.wasm.wasmPaths = wasmDir;
     ort.env.wasm.numThreads = 1;
+    // 推理放进 Web Worker 执行，避免长时间占用主线程导致页面卡死/被杀
+    ort.env.wasm.proxy = true;
   }
 }
 
@@ -538,11 +593,11 @@ class AiInpaint {
 
   modelUrls() {
     const localDir = new URL('assets/model/lama/', document.baseURI).href;
-    const cdnDir = MODEL_CDN + 'assets/model/lama/';
     const urls = [];
     for (let i = 1; i <= this.modelParts; i++) {
       const f = 'part-' + pad2(i) + '.bin';
-      urls.push(ModelFetcher.preferCdn ? [cdnDir + f, localDir + f] : [localDir + f, cdnDir + f]);
+      const mirrors = MODEL_MIRRORS.map(m => m + 'assets/model/lama/' + f);
+      urls.push(ModelFetcher.preferCdn ? mirrors.concat([localDir + f]) : [localDir + f].concat(mirrors));
     }
     return urls;
   }
@@ -570,7 +625,7 @@ class AiInpaint {
       if (blob.size !== this.modelTotal) throw new Error('AI 修复模型大小校验失败');
       if (onProgress) onProgress('正在加载 AI 模型…');
       this.session = await ort.InferenceSession.create(await blob.arrayBuffer(), {
-        executionProviders: ['wasm'],
+        executionProviders: ['wasm'], // LaMa 为 int8 量化模型，WebGPU 内核存在 Add 算子缺陷，走 wasm 更稳
       });
       return this.session;
     })().catch(e => { this.loading = null; throw e; });
@@ -943,8 +998,8 @@ class AiCutout {
 
   urls() {
     const local = new URL('assets/model/u2netp.onnx', document.baseURI).href;
-    const cdn = MODEL_CDN + 'assets/model/u2netp.onnx';
-    return ModelFetcher.preferCdn ? [cdn, local] : [local, cdn];
+    const mirrors = MODEL_MIRRORS.map(m => m + 'assets/model/u2netp.onnx');
+    return ModelFetcher.preferCdn ? mirrors.concat([local]) : [local].concat(mirrors);
   }
 
   ensureSession(onProgress) {
@@ -959,7 +1014,7 @@ class AiCutout {
       });
       if (onProgress) onProgress('正在加载抠图模型…');
       this.session = await ort.InferenceSession.create(await res.blob.arrayBuffer(), {
-        executionProviders: ['wasm'],
+        executionProviders: ['wasm'], // WebGPU 不支持 u2netp 的 MaxPool ceil 形状计算，走 wasm
       });
       return this.session;
     })().catch(e => { this.loading = null; throw e; });
@@ -1072,7 +1127,10 @@ class ImageEditor {
     this.bindCompare();
     this.onModeChange();
     window.addEventListener('resize', () => {
-      if (this.loaded && this.zoom.scale <= 1.001) this.fitCanvasSize();
+      if (!this.loaded) return;
+      this.fitCanvasSize();
+      this.clampView();
+      this.applyTransform();
     });
   }
 
@@ -1198,46 +1256,68 @@ class ImageEditor {
     };
   }
 
-  stageCenter() {
-    const r = $('#imgStage').getBoundingClientRect();
-    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  /** 记录画布未变换时的基础位置（页面坐标，滚动后依然有效），缩放锚点计算用 */
+  measureBase() {
+    const prev = this.canvas.style.transform;
+    this.canvas.style.transform = 'none';
+    const r = this.canvas.getBoundingClientRect();
+    this.canvas.style.transform = prev;
+    this.base = { x: r.left + window.scrollX, y: r.top + window.scrollY };
   }
 
   applyTransform() {
-    const t = 'translate(' + this.zoom.tx + 'px, ' + this.zoom.ty + 'px) scale(' + this.zoom.scale + ')';
+    const z = this.zoom;
+    const t = 'translate(' + z.tx + 'px, ' + z.ty + 'px) scale(' + z.scale + ')';
     this.canvas.style.transform = t;
     this.maskCanvas.style.transform = t;
     const zr = $('#imgZoomReset');
-    zr.classList.toggle('hidden', this.zoom.scale <= 1.001 && Math.abs(this.zoom.tx) < 0.5 && Math.abs(this.zoom.ty) < 0.5);
+    zr.classList.toggle('hidden', z.scale <= 1.001 && Math.abs(z.tx) < 0.5 && Math.abs(z.ty) < 0.5);
   }
 
-  clampZoom() {
+  /** 限制平移范围：放大时画布始终盖住舞台（不会露白/乱跑），1:1 时保持居中（页面坐标） */
+  clampView() {
     const z = this.zoom;
-    const r = $('#imgStage').getBoundingClientRect();
-    const c0 = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    const sr = $('#imgStage').getBoundingClientRect();
+    const sLeft = sr.left + window.scrollX;
+    const sTop = sr.top + window.scrollY;
+    const B = this.base;
     const w = this.canvas.clientWidth * z.scale;
     const h = this.canvas.clientHeight * z.scale;
-    z.tx = Math.max((r.left + 40) - c0.x - w / 2, Math.min((r.right - 40) - c0.x + w / 2, z.tx));
-    z.ty = Math.max((r.top + 40) - c0.y - h / 2, Math.min((r.bottom - 40) - c0.y + h / 2, z.ty));
+    const margin = 24;
+    const vx = B.x + z.tx;
+    const vy = B.y + z.ty;
+    let nvx = vx, nvy = vy;
+    if (w <= sr.width) nvx = sLeft + (sr.width - w) / 2;
+    else nvx = Math.max(sLeft + sr.width - w - margin, Math.min(sLeft + margin, vx));
+    if (h <= sr.height) nvy = sTop + (sr.height - h) / 2;
+    else nvy = Math.max(sTop + sr.height - h - margin, Math.min(sTop + margin, vy));
+    z.tx = nvx - B.x;
+    z.ty = nvy - B.y;
   }
 
+  /** 以 client 坐标点 p 为锚点缩放：p 下方的图像内容保持不动 */
   zoomAround(p, s) {
+    if (!this.base) this.measureBase();
+    const px = p.x + window.scrollX;
+    const py = p.y + window.scrollY;
     const z = this.zoom;
-    const c0 = this.stageCenter();
-    const rect = this.canvas.getBoundingClientRect();
-    const S = {
-      x: rect.left + p.x / this.canvas.width * rect.width,
-      y: rect.top + p.y / this.canvas.height * rect.height,
-    };
-    z.scale = Math.max(1, Math.min(6, s));
-    z.tx = S.x - c0.x - z.scale * (p.x - c0.x);
-    z.ty = S.y - c0.y - z.scale * (p.y - c0.y);
-    this.clampZoom();
+    const B = this.base;
+    const s0 = z.scale;
+    const vx0 = B.x + z.tx;
+    const vy0 = B.y + z.ty;
+    const lx = (px - vx0) / s0;
+    const ly = (py - vy0) / s0;
+    z.scale = Math.max(1, Math.min(8, s));
+    z.tx = (px - lx * z.scale) - B.x;
+    z.ty = (py - ly * z.scale) - B.y;
+    this.clampView();
     this.applyTransform();
   }
 
   resetZoom() {
+    if (!this.base) this.measureBase();
     this.zoom = { scale: 1, tx: 0, ty: 0 };
+    this.clampView();
     this.applyTransform();
   }
 
@@ -1248,14 +1328,18 @@ class ImageEditor {
     const p2 = this.pointers.get(ids[1]);
     const mid = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
     const dist = Math.max(24, Math.hypot(p1.x - p2.x, p1.y - p2.y));
+    if (!this.base) this.measureBase();
+    const B = this.base;
+    const s0 = this.zoom.scale;
+    const mx = mid.x + window.scrollX;
+    const my = mid.y + window.scrollY;
     this.pinch = {
       startDist: dist,
-      startScale: this.zoom.scale,
-      startTx: this.zoom.tx,
-      startTy: this.zoom.ty,
-      startMid: mid,
-      anchor: this.clientToLocal(mid.x, mid.y),
-      center: this.stageCenter(),
+      startScale: s0,
+      anchor: {
+        x: (mx - (B.x + this.zoom.tx)) / s0,
+        y: (my - (B.y + this.zoom.ty)) / s0,
+      },
     };
     this._hadPinch = true;
     ids.forEach(id => this.gestureBlocked.add(id));
@@ -1270,13 +1354,14 @@ class ImageEditor {
     const p2 = this.pointers.get(ids[1]);
     const mid = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
     const dist = Math.max(24, Math.hypot(p1.x - p2.x, p1.y - p2.y));
-    const s = Math.max(1, Math.min(6, pin.startScale * dist / pin.startDist));
-    const a = pin.anchor;
-    const c0 = pin.center;
-    this.zoom.scale = s;
-    this.zoom.tx = pin.startTx + (mid.x - pin.startMid.x) + (pin.startScale - s) * (a.x - c0.x);
-    this.zoom.ty = pin.startTy + (mid.y - pin.startMid.y) + (pin.startScale - s) * (a.y - c0.y);
-    this.clampZoom();
+    const z = this.zoom;
+    const B = this.base;
+    const mx = mid.x + window.scrollX;
+    const my = mid.y + window.scrollY;
+    z.scale = Math.max(1, Math.min(8, pin.startScale * dist / pin.startDist));
+    z.tx = (mx - pin.anchor.x * z.scale) - B.x;
+    z.ty = (my - pin.anchor.y * z.scale) - B.y;
+    this.clampView();
     this.applyTransform();
   }
 
@@ -1288,7 +1373,7 @@ class ImageEditor {
       if (e.target.closest('button, select')) return;
       const isTouch = e.pointerType === 'touch';
       if (isTouch) this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      stage.setPointerCapture(e.pointerId);
+      try { stage.setPointerCapture(e.pointerId); } catch (_) {}
 
       if (isTouch) {
         if (this.pointers.size === 1 && this.lastTap &&
@@ -1768,7 +1853,7 @@ class ImageEditor {
       toast('请选择图片文件（JPG / PNG / WebP）');
       return;
     }
-    const MAX = 2800;
+    const MAX = 2000;
     let bitmap = null;
     try {
       bitmap = await createImageBitmap(file, { resizeQuality: 'high' });
@@ -1836,6 +1921,7 @@ class ImageEditor {
       c.style.height = h + 'px';
     }
     stage.style.minHeight = h + 'px';
+    this.measureBase();
   }
 
   /* ---------- 处理流程 ---------- */
@@ -1925,7 +2011,7 @@ class ImageEditor {
     } catch (e) {
       console.error('AI 修复失败', e);
       window.__aiDone = false;
-      toast('AI 修复失败，已保留快速修复结果：' + (e && e.message ? String(e.message).slice(0, 90) : e), 5000);
+      toast('AI 修复失败，已保留快速修复结果：' + (e && e.message ? String(e.message).slice(0, 80) : e) + '。请检查网络/存储后重试', 6000);
       return false;
     }
   }
@@ -1947,7 +2033,7 @@ class ImageEditor {
       toast('抠图完成：绿色=主体，可用「保留/去除」画笔修正，然后下载透明图或移除主体', 4600);
     } catch (e) {
       console.error(e);
-      toast('抠图失败：' + (e && e.message || e), 4000);
+      toast('抠图失败：' + (e && e.message || e) + '。请重试；大图建议先压缩尺寸', 5000);
     } finally {
       this.setBusy(false);
     }
